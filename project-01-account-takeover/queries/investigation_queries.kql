@@ -1,0 +1,143 @@
+// Cloudora CLD-IR-0001 — Account Takeover Investigation
+// Synthetic defensive-security training data.
+
+// 1. Validate sign-in ingestion
+CloudoraSignIn_CL
+| count
+
+// 2. Count failed sign-ins
+CloudoraSignIn_CL
+| where ResultType == "50126"
+| count
+
+// 3. Validate audit ingestion
+CloudoraAudit_CL
+| count
+
+// 4. CEO incident-day timeline
+CloudoraSignIn_CL
+| where UserPrincipalName == "daniel.reeve@cloudora.io"
+| where TimeGenerated between (datetime(2026-08-10) .. datetime(2026-08-11))
+| project TimeGenerated, AppDisplayName, IPAddress, City, Country, ResultType, ResultDescription
+| order by TimeGenerated asc
+
+// 5. CEO location baseline
+CloudoraSignIn_CL
+| where UserPrincipalName == "daniel.reeve@cloudora.io"
+| summarize SignIns=count(),
+            FirstSeen=min(TimeGenerated),
+            LastSeen=max(TimeGenerated)
+  by Country, City, IPAddress
+| order by SignIns desc
+
+// 6. Compare with legitimate travel baseline
+CloudoraSignIn_CL
+| where UserPrincipalName == "omar.farah@cloudora.io"
+| summarize SignIns=count(),
+            FirstSeen=min(TimeGenerated),
+            LastSeen=max(TimeGenerated)
+  by Country, City, IPAddress
+| order by SignIns desc
+
+// 7. Review Omar's non-UK activity
+CloudoraSignIn_CL
+| where UserPrincipalName == "omar.farah@cloudora.io"
+| where Country != "United Kingdom"
+| project TimeGenerated, AppDisplayName, IPAddress, City, Country,
+          ResultType, ResultDescription, DeviceOS, Browser
+| order by TimeGenerated asc
+
+// 8. Password-spray source summary
+CloudoraSignIn_CL
+| where ResultType == "50126"
+| summarize Failures=count(),
+            TargetedAccounts=dcount(UserPrincipalName)
+  by IPAddress, Country
+| order by Failures desc
+
+// 9. Three-night attacker window
+CloudoraSignIn_CL
+| where IPAddress startswith "102.89."
+| summarize Attempts=count() by bin(TimeGenerated, 1d), ResultType
+| order by TimeGenerated asc
+
+// 10. Persistence / attacker audit events
+CloudoraAudit_CL
+| where IPAddress startswith "102.89."
+| project TimeGenerated, ActivityDisplayName, TargetUser, IPAddress, Details
+| order by TimeGenerated asc
+
+// 11. Successful attacker sign-ins
+CloudoraSignIn_CL
+| where IPAddress startswith "102.89." and ResultType == "0"
+| summarize by UserPrincipalName, IPAddress, TimeGenerated
+| order by TimeGenerated asc
+
+// 12. Priya Nair timeline
+CloudoraSignIn_CL
+| where UserPrincipalName == "priya.nair@cloudora.io"
+| where IPAddress startswith "102.89."
+| project TimeGenerated, AppDisplayName, IPAddress, City, Country,
+          ResultType, ResultDescription, DeviceOS, Browser
+| order by TimeGenerated asc
+
+// 13. Priya Nair location baseline
+CloudoraSignIn_CL
+| where UserPrincipalName == "priya.nair@cloudora.io"
+| summarize SignIns=count(),
+            FirstSeen=min(TimeGenerated),
+            LastSeen=max(TimeGenerated)
+  by Country, City, IPAddress
+| order by SignIns desc
+
+// 14. Priya persistence check
+CloudoraAudit_CL
+| where TargetUser == "priya.nair@cloudora.io"
+| project TimeGenerated, ActivityDisplayName, InitiatedBy, IPAddress, Details
+| order by TimeGenerated asc
+
+// 15. Targeted-but-not-breached accounts
+let Breached = CloudoraSignIn_CL
+| where IPAddress startswith "102.89." and ResultType == "0"
+| distinct UserPrincipalName;
+CloudoraSignIn_CL
+| where IPAddress startswith "102.89." and ResultType == "50126"
+| where UserPrincipalName !in (Breached)
+| summarize Attempts=count(),
+            FirstAttempt=min(TimeGenerated),
+            LastAttempt=max(TimeGenerated)
+  by UserPrincipalName
+| order by Attempts desc
+
+// 16. Detection: password spray across >=10 accounts in six hours
+CloudoraSignIn_CL
+| where ResultType == "50126"
+| summarize Failures=count(),
+            TargetedAccounts=dcount(UserPrincipalName),
+            SampleAccounts=make_set(UserPrincipalName, 5)
+  by bin(TimeGenerated, 6h), IPAddress, Country
+| where TargetedAccounts >= 10
+| order by TimeGenerated asc, TargetedAccounts desc
+
+// 17. Combined incident timeline
+let AttackerSignIns = CloudoraSignIn_CL
+| where TimeGenerated between (datetime(2026-08-10) .. datetime(2026-08-10 09:00:00))
+| where UserPrincipalName in ("daniel.reeve@cloudora.io", "priya.nair@cloudora.io")
+| where IPAddress startswith "102.89."
+    or (UserPrincipalName == "daniel.reeve@cloudora.io" and IPAddress == "203.0.113.11")
+| project TimeGenerated,
+          Source="Sign-in",
+          User=UserPrincipalName,
+          Event=strcat(AppDisplayName, " — ", ResultDescription),
+          IPAddress,
+          Details=strcat(City, ", ", Country, " | ", DeviceOS, " / ", Browser);
+let AttackerAudit = CloudoraAudit_CL
+| where IPAddress startswith "102.89."
+| project TimeGenerated,
+          Source="Audit",
+          User=TargetUser,
+          Event=ActivityDisplayName,
+          IPAddress,
+          Details;
+union AttackerSignIns, AttackerAudit
+| order by TimeGenerated asc
